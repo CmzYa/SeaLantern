@@ -5,6 +5,91 @@
 
 use std::fmt::Display;
 
+/// 应用插件执行内核的 tracing 目标。
+pub const APP_PLUGIN_TARGET: &str = "sealantern.extra.app_plugin";
+
+/// Event: 发现的插件因 API 版本过旧被拒绝。
+pub const EVENT_APP_PLUGIN_API_TOO_OLD: &str = "app_plugin_api_too_old";
+/// Event: 插件已完成脚本加载。
+pub const EVENT_APP_PLUGIN_LOADED: &str = "app_plugin_loaded";
+/// Event: 插件生命周期回调失败。
+pub const EVENT_APP_PLUGIN_LIFECYCLE_FAILED: &str = "app_plugin_lifecycle_failed";
+/// Event: 插件私有存储操作失败。
+pub const EVENT_APP_PLUGIN_STORAGE_FAILED: &str = "app_plugin_storage_failed";
+/// Event: 插件输出日志。
+pub const EVENT_APP_PLUGIN_LOG_EMITTED: &str = "app_plugin_log_emitted";
+/// Event: 插件加载失败。
+pub const EVENT_APP_PLUGIN_LOAD_FAILED: &str = "app_plugin_load_failed";
+/// Event: 插件脚本耗尽执行预算。
+pub const EVENT_APP_PLUGIN_EXECUTION_LIMIT_EXCEEDED: &str = "app_plugin_execution_limit_exceeded";
+
+/// 记录因不支持的旧 API 而拒绝插件。
+pub fn app_plugin_api_too_old(plugin_id: &str, found_api_version: Option<u32>) {
+    tracing::warn!(
+        target: APP_PLUGIN_TARGET,
+        event_name = EVENT_APP_PLUGIN_API_TOO_OLD,
+        plugin_id,
+        found_api_version,
+        "plugin rejected because its API version is too old"
+    );
+}
+
+/// 记录插件脚本加载完成。
+pub fn app_plugin_loaded(plugin_id: &str) {
+    tracing::info!(
+        target: APP_PLUGIN_TARGET,
+        event_name = EVENT_APP_PLUGIN_LOADED,
+        plugin_id,
+        "plugin script loaded"
+    );
+}
+
+/// 记录插件生命周期回调失败。
+pub fn app_plugin_lifecycle_failed(plugin_id: &str, lifecycle: &str, error_kind: &str) {
+    tracing::error!(
+        target: APP_PLUGIN_TARGET,
+        event_name = EVENT_APP_PLUGIN_LIFECYCLE_FAILED,
+        plugin_id,
+        lifecycle,
+        error_kind,
+        "plugin lifecycle callback failed"
+    );
+}
+
+/// 记录插件私有存储失败。
+pub fn app_plugin_storage_failed(plugin_id: &str, operation: &str) {
+    tracing::error!(
+        target: APP_PLUGIN_TARGET,
+        event_name = EVENT_APP_PLUGIN_STORAGE_FAILED,
+        plugin_id,
+        operation,
+        "plugin storage operation failed"
+    );
+}
+
+/// 记录插件在加载过程中的失败，不记录脚本正文或错误详情。
+pub fn app_plugin_load_failed(plugin_id: &str, phase: &'static str, error_kind: &str) {
+    tracing::error!(
+        target: APP_PLUGIN_TARGET,
+        event_name = EVENT_APP_PLUGIN_LOAD_FAILED,
+        plugin_id,
+        phase,
+        error_kind,
+        "plugin load failed"
+    );
+}
+
+/// 记录插件脚本耗尽执行预算。
+pub fn app_plugin_execution_limit_exceeded(plugin_id: &str, operation: &'static str) {
+    tracing::warn!(
+        target: APP_PLUGIN_TARGET,
+        event_name = EVENT_APP_PLUGIN_EXECUTION_LIMIT_EXCEEDED,
+        plugin_id,
+        operation,
+        "plugin execution limit exceeded"
+    );
+}
+
 /// 市场模块的 tracing 目标。
 pub const MARKET_TARGET: &str = "sealantern.extra.market";
 
