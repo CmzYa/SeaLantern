@@ -1319,7 +1319,7 @@ dependencies = [
 name = "docker-entry"
 version = "1.1.0"
 dependencies = [
- "sealantern-tauri",
+ "sea-lantern",
 ]
 
 [[package]]
@@ -5059,6 +5059,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sea-lantern"
+version = "1.2.0"
+dependencies = [
+ "sealantern-core",
+ "sealantern-extra",
+ "sealantern-infra",
+ "sealantern-server",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-http",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-window-state",
+]
+
+[[package]]
 name = "sealantern-core"
 version = "0.1.0"
 dependencies = [
@@ -5119,23 +5137,6 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
-]
-
-[[package]]
-name = "sealantern-tauri"
-version = "1.2.0"
-dependencies = [
- "sealantern-core",
- "sealantern-extra",
- "sealantern-infra",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-http",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-window-state",
 ]
 
 [[package]]
