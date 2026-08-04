@@ -22,11 +22,13 @@ pub use model::*;
 use evidence::{EvidenceCollector, NewEvidence};
 use formats::manifest::ParsedManifest;
 use formats::mojang_version::MojangVersionDocument;
+pub(crate) use resolver::{detection_outcome, server_implementation_outcome, DetectionOutcome};
 use resolver::{resolve, DetectionClaim};
 
 const MANIFEST_ENTRY: &str = "META-INF/MANIFEST.MF";
 const MOJANG_VERSION_ENTRY: &str = "version.json";
 const SERVER_INSPECTION_TARGET: &str = "sealantern.core.provisioning.server_inspection";
+const MINIMUM_SERVER_IMPLEMENTATION_CONFIDENCE: u8 = 50;
 
 /// 控制静态检查的资源预算；检查过程不会执行 JAR、脚本或 shell 展开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1939,6 +1941,28 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "metadata_entry_too_large"));
+    }
+
+    #[test]
+    fn filename_only_product_remains_an_unselected_candidate() {
+        let path = temporary_path("paper.jar");
+        write_test_jar_entries(&path, &[("empty", "")]);
+
+        let report = inspect_server_artifact(&path, &InspectionOptions::default())
+            .expect("inspect metadata-free JAR");
+        fs::remove_file(&path).expect("remove metadata-free JAR");
+
+        assert!(report.identity.implementation.value.is_none());
+        assert_eq!(report.identity.implementation.confidence, 25);
+        assert_eq!(report.identity.implementation.alternatives.len(), 1);
+        assert_eq!(report.identity.implementation.alternatives[0].value.key, "paper");
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "insufficient_server_implementation_evidence"
+        }));
+        assert!(!report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "conflicting_server_implementations" }));
     }
 
     #[test]

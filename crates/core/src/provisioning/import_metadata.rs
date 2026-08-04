@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,9 +11,9 @@ use crate::instance::{
 
 use super::launch_adapter::adapt_launch_profile;
 use super::server_inspection::{
-    inspect_server_artifact, Detected, DiagnosticSeverity, InspectionDiagnostic, InspectionOptions,
-    LaunchPlatform, LaunchProfile, LaunchTarget, ReleaseChannel, ServerInspectionError,
-    ServerInspectionReport,
+    detection_outcome, inspect_server_artifact, server_implementation_outcome, Detected,
+    DetectionOutcome, DiagnosticSeverity, InspectionDiagnostic, InspectionOptions, LaunchPlatform,
+    LaunchProfile, LaunchTarget, ReleaseChannel, ServerInspectionError, ServerInspectionReport,
 };
 
 /// 控制检查结果是否可以替换已有的启动配置。
@@ -115,7 +116,8 @@ pub fn apply_server_inspection_with_options(
         diagnostics.push(unresolved_diagnostic(
             "server implementation",
             &report.identity.implementation,
-            |product| product.key.clone(),
+            server_implementation_outcome(&report.identity.implementation),
+            |product| Cow::Borrowed(product.key.as_str()),
         ));
     }
 
@@ -131,7 +133,8 @@ pub fn apply_server_inspection_with_options(
         diagnostics.push(unresolved_diagnostic(
             "server implementation version",
             &report.identity.version,
-            |version| version.clone(),
+            detection_outcome(&report.identity.version),
+            |version| Cow::Borrowed(version.as_str()),
         ));
     }
 
@@ -148,7 +151,8 @@ pub fn apply_server_inspection_with_options(
                 diagnostics.push(unresolved_diagnostic(
                     "Minecraft version",
                     &minecraft.version,
-                    |version| version.clone(),
+                    detection_outcome(&minecraft.version),
+                    |version| Cow::Borrowed(version.as_str()),
                 ));
             }
         }
@@ -521,15 +525,16 @@ fn diagnostic_severity_name(severity: DiagnosticSeverity) -> &'static str {
     }
 }
 
-fn unresolved_diagnostic<T, F>(
+fn unresolved_diagnostic<'a, T, F>(
     field: &str,
-    detected: &Detected<T>,
+    detected: &'a Detected<T>,
+    outcome: DetectionOutcome,
     format_candidate: F,
 ) -> InspectionDiagnostic
 where
-    F: Fn(&T) -> String,
+    F: Fn(&'a T) -> Cow<'a, str>,
 {
-    if detected.alternatives.is_empty() {
+    if outcome == DetectionOutcome::Missing {
         return missing_diagnostic(field);
     }
 
@@ -541,6 +546,20 @@ where
         })
         .collect::<Vec<_>>()
         .join(", ");
+    if matches!(outcome, DetectionOutcome::InsufficientEvidence { .. }) {
+        return InspectionDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: format!(
+                "server_inspection_{}_insufficient_evidence",
+                field.replace(' ', "_").to_ascii_lowercase()
+            ),
+            message: format!(
+                "{field} has insufficient evidence ({candidates}); existing import metadata was preserved; provide stronger metadata or choose a value manually"
+            ),
+            evidence: detected.evidence.clone(),
+        };
+    }
+
     InspectionDiagnostic {
         severity: DiagnosticSeverity::Warning,
         code: format!(
@@ -570,6 +589,7 @@ fn missing_diagnostic(field: &str) -> InspectionDiagnostic {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
@@ -577,11 +597,12 @@ mod tests {
 
     use super::{
         apply_server_inspection, apply_server_inspection_with_options, compatible_launch_candidate,
-        LaunchProfilePolicy, ServerInspectionProjectionOptions,
+        unresolved_diagnostic, LaunchProfilePolicy, ServerInspectionProjectionOptions,
     };
     use crate::instance::{InstanceId, InstanceSpec, LocalLaunch, StartupMode};
     use crate::provisioning::server_inspection::{
-        Attributed, LaunchPlatform, LaunchProfile, LaunchTarget,
+        server_implementation_outcome, Attributed, Detected, DetectionCandidate, LaunchPlatform,
+        LaunchProfile, LaunchTarget,
     };
     use crate::provisioning::{inspect_server_artifact, InspectionOptions};
     use zip::write::FileOptions;
@@ -666,6 +687,59 @@ mod tests {
         assert_eq!(instance.core_type, "custom-fork");
         assert_eq!(instance.core_version, "26.2.build.1-stable");
         assert_eq!(instance.game_version, "26.2");
+    }
+
+    #[test]
+    fn preserves_existing_product_when_filename_is_the_only_evidence() {
+        let mut instance = instance_spec();
+        let path = write_test_jar("purpur.jar", &[("empty", "")]);
+        let report = inspect_server_artifact(&path, &InspectionOptions::default())
+            .expect("inspect metadata-free JAR");
+        std::fs::remove_file(&path).expect("remove metadata-free JAR");
+
+        let diagnostics = apply_server_inspection(&mut instance, Ok(&report));
+
+        assert_eq!(instance.core_type, "paper");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "server_inspection_server_implementation_insufficient_evidence"
+        }));
+        assert!(!diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "server_inspection_server_implementation_ambiguous"
+        }));
+    }
+
+    #[test]
+    fn multiple_low_confidence_candidates_are_reported_as_insufficient() {
+        let detected = Detected {
+            value: None,
+            confidence: 25,
+            evidence: Vec::new(),
+            alternatives: vec![
+                DetectionCandidate {
+                    value: "paper".to_string(),
+                    confidence: 25,
+                    evidence: Vec::new(),
+                },
+                DetectionCandidate {
+                    value: "purpur".to_string(),
+                    confidence: 20,
+                    evidence: Vec::new(),
+                },
+            ],
+        };
+
+        let diagnostic = unresolved_diagnostic(
+            "server implementation",
+            &detected,
+            server_implementation_outcome(&detected),
+            |value| Cow::Owned(format!("product:{value}")),
+        );
+
+        assert_eq!(
+            diagnostic.code,
+            "server_inspection_server_implementation_insufficient_evidence"
+        );
+        assert!(diagnostic.message.contains("product:paper"));
     }
 
     #[test]
