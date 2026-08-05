@@ -1,0 +1,16 @@
+[package]
+name = "sealantern-application"
+version = "1.2.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1.91"
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "sync", "fs"] }
+sealantern-core = { path = "../crates/core" }
+sealantern-interface = { path = "../crates/interface" }
+sealantern-extra = { path = "../crates/extra" }
+sealantern-infra = { path = "../crates/infra" }
