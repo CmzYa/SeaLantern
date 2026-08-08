@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sealantern_core::instance::{Instance, InstanceId, InstanceSpec, LocalLaunch, StartupMode};
-use sealantern_core::server::{ServerProcessState, ServerStatus};
-use sealantern_infra::platform::get_app_data_dir;
+use sealantern_interface::server::{ServerSnapshot, ServerState};
 use sealantern_interface::system::{
     CpuInfo, DiskInfo, DiskSummary, MemoryInfo, NetworkInfo, ProcessResourceUsage, SystemSnapshot,
 };
@@ -75,7 +74,13 @@ pub(crate) fn create_params_to_spec(
 ) -> Result<InstanceSpec, InstanceServiceError> {
     let id_str = uuid::Uuid::new_v4().to_string();
     let id = InstanceId::new(id_str).map_err(|_| InstanceServiceError::InvalidInput)?;
-    let directory = get_app_data_dir().join("servers").join(id.as_str());
+    // 服务器目录取 jar 文件所在目录（进程工作目录需真实存在，否则 spawn 失败）。
+    let jar_path_obj = PathBuf::from(&params.jar_path);
+    let directory = jar_path_obj
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -193,31 +198,33 @@ pub(crate) fn system_snapshot_to_frontend(snapshot: SystemSnapshot) -> FrontendS
     }
 }
 
-/// `ServerStatus` → 前端 `ServerStatusInfo`。
+/// `ServerSnapshot` → 前端 `ServerStatusInfo`。
 ///
-/// - `Running → "Running"`、`Exited(0) → "Stopped"`、`Exited(非0) → "Error"`、`Exited(无码) → "Stopped"`
-/// - `pid`：Running 时 `Some(process_id)`，Exited 时 `None`
-/// - `uptime`：后端无此信息，恒 `None`
+/// - 状态映射：`Starting → "Starting"`、`Running → "Running"`、
+///   `Stopping → "Stopping"`、`Stopped → "Stopped"`
+/// - `error_message` 非空时 → `"Error"`
+/// - `pid`：非 Stopped 时 `Some(process_id)`，否则 `None`
+/// - `uptime`：`uptime_secs`
 pub(crate) fn server_status_to_frontend(
     id: String,
-    status: ServerStatus,
+    status: ServerSnapshot,
 ) -> FrontendServerStatusInfo {
-    let (status_str, pid) = match status.state {
-        ServerProcessState::Running => ("Running".to_string(), Some(status.process_id)),
-        ServerProcessState::Exited(exit_status) => {
-            let mapped = exit_status
-                .code()
-                .map(|code| if code == 0 { "Stopped" } else { "Error" })
-                .unwrap_or("Stopped");
-            (mapped.to_string(), None)
+    let status_str = if status.error_message.is_some() {
+        "Error".to_string()
+    } else {
+        match status.state {
+            ServerState::Starting => "Starting".to_string(),
+            ServerState::Running => "Running".to_string(),
+            ServerState::Stopping => "Stopping".to_string(),
+            ServerState::Stopped => "Stopped".to_string(),
         }
     };
 
     FrontendServerStatusInfo {
         id,
         status: status_str,
-        pid,
-        uptime: None,
+        pid: status.pid,
+        uptime: status.uptime_secs,
     }
 }
 
@@ -441,9 +448,8 @@ mod tests {
         let spec = create_params_to_spec(params).expect("spec should build");
         // UUID 非空
         assert!(!spec.id.as_str().is_empty());
-        // 目录以 servers/{id} 结尾
-        assert!(spec.directory.ends_with(spec.id.as_str()));
-        assert!(spec.directory.starts_with(get_app_data_dir()));
+        // 服务器目录为 jar 所在目录（进程工作目录）
+        assert_eq!(spec.directory, PathBuf::from("/tmp"));
         // created_at > 0（除非系统时钟异常）
         assert!(spec.created_at_unix_secs > 0);
         // core_version 留空

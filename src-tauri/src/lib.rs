@@ -17,13 +17,6 @@ use adapter::tauri::commands::compat::system_compat::{
     get_default_run_path, get_safe_mode_status, get_server_resource_usage, get_system_info,
     open_file, open_folder, remove_file, test_ipv6_connectivity,
 };
-use adapter::tauri::commands::instance::{
-    create_instance, delete_instance, force_stop_instance, get_instance, instance_status,
-    list_instances, rename_instance, start_instance, stop_instance, update_instance_path,
-};
-use adapter::tauri::commands::system::{
-    get_directory_usage, get_process_usage, get_system_snapshot,
-};
 use desktop::{
     desktop_pick_archive_file, desktop_pick_folder, desktop_pick_image_file, desktop_pick_jar_file,
     desktop_pick_java_file, desktop_pick_save_file, desktop_pick_server_executable,
@@ -44,21 +37,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            //instance能力（由adapter/tauri/commands接入application）
-            create_instance,
-            delete_instance,
-            force_stop_instance,
-            get_instance,
-            instance_status,
-            list_instances,
-            rename_instance,
-            start_instance,
-            stop_instance,
-            update_instance_path,
-            //系统资源能力（由adapter/tauri/commands接入application）
-            get_directory_usage,
-            get_process_usage,
-            get_system_snapshot,
             //桌面端能力（由desktop/dialog提供）
             desktop_pick_archive_file,
             desktop_pick_folder,
