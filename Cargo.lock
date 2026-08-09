@@ -5224,6 +5224,7 @@ dependencies = [
  "sealantern-interface",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5293,6 +5294,7 @@ dependencies = [
  "async-trait",
  "sealantern-core",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
