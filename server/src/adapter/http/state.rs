@@ -10,7 +10,8 @@
 use std::sync::Arc;
 
 use sealantern_application::service::{
-    CoreCronTaskService, CoreInstanceService, CoreServerService, CoreSystemService,
+    CoreCronTaskService, CoreInstanceService, CoreServerService, CoreSettingsService,
+    CoreSystemService,
 };
 use sealantern_application::services::AppServices;
 
@@ -36,6 +37,11 @@ impl AppState {
     /// 访问服务器进程管理服务（`Arc` 共享句柄，clone 廉价）。
     pub fn server(&self) -> Arc<CoreServerService> {
         self.services.server().clone()
+    }
+
+    /// 访问设置信息服务（`Arc` 共享句柄，clone 廉价）。
+    pub fn settings(&self) -> Arc<CoreSettingsService> {
+        self.services.settings().clone()
     }
 
     /// 访问服务器定时任务服务（`Arc` 共享句柄，clone 廉价）。

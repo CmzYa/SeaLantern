@@ -16,6 +16,8 @@ pub mod instance;
 pub mod plugin;
 /// 服务器管理领域错误。
 pub mod server;
+/// 设置信息服务领域错误。
+pub mod settings;
 /// 系统资源信息领域错误。
 pub mod system;
 
@@ -25,4 +27,5 @@ pub use download::DownloadError;
 pub use instance::InstanceError;
 pub use plugin::PluginError;
 pub use server::ServerError;
+pub use settings::SettingsError;
 pub use system::SystemError;

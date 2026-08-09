@@ -14,10 +14,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use sealantern_extra::config::SettingsManager;
+use sealantern_infra::platform::get_app_data_dir;
+
 use crate::error::InstanceError;
 use crate::service::{
     CoreCronTaskService, CoreDownloadService, CoreInstanceService, CoreServerService,
-    CoreSystemService,
+    CoreSettingsService, CoreSystemService,
 };
 
 /// 真正的全局服务容器（进程级单例，内部为异步锁 + 可配置）。
@@ -41,8 +44,12 @@ pub struct AppServicesInner {
     pub server: Arc<CoreServerService>,
     /// 服务器定时任务服务。
     pub cron: Arc<CoreCronTaskService>,
+    /// 设置信息服务。
+    pub settings: Arc<CoreSettingsService>,
     /// 系统资源信息服务。
     pub system: Arc<CoreSystemService>,
+    /// 设置管理器（持久化配置）。
+    pub settings_manager: Option<tokio::sync::Mutex<SettingsManager>>,
 }
 
 /// 进程级全局容器。惰性初始化，可替换。
@@ -52,7 +59,7 @@ static SERVICES: tokio::sync::RwLock<Option<Arc<AppServicesInner>>> =
 impl AppServices {
     /// 从既有实例构造句柄（供测试/重载注入 `register`）。
     ///
-    /// 服务器进程服务共享同一实例服务句柄；下载/系统资源服务自动构造。
+    /// 服务器进程服务共享同一实例服务句柄；下载/定时任务/系统资源服务自动构造。
     pub fn from_inner(instance: CoreInstanceService) -> Self {
         let instance = Arc::new(instance);
         let server = Arc::new(CoreServerService::new(instance.clone()));
@@ -65,9 +72,40 @@ impl AppServices {
                 cron: Arc::new(CoreCronTaskService::new(server.clone())),
                 server,
                 instance,
+                settings: Arc::new(CoreSettingsService),
                 system: Arc::new(CoreSystemService),
+                settings_manager: None,
             }),
         }
+    }
+
+    /// 从既有实例和设置管理器构造句柄（用于实际初始化）。
+    async fn from_inner_with_settings(
+        instance: CoreInstanceService,
+    ) -> Result<Self, InstanceError> {
+        let instance = Arc::new(instance);
+
+        // 加载设置管理器
+        let settings_path = get_app_data_dir().join("sea_lantern_settings.json");
+        let settings_manager = SettingsManager::load(&settings_path)
+            .await
+            .map_err(|e| InstanceError::Internal(e.to_string()))?;
+
+        let server = Arc::new(CoreServerService::new(instance.clone()));
+        Ok(Self {
+            inner: Arc::new(AppServicesInner {
+                background_started: AtomicBool::new(false),
+                download: Arc::new(
+                    CoreDownloadService::new().expect("failed to init download service"),
+                ),
+                cron: Arc::new(CoreCronTaskService::new(server.clone())),
+                server,
+                instance,
+                settings: Arc::new(CoreSettingsService),
+                system: Arc::new(CoreSystemService),
+                settings_manager: Some(tokio::sync::Mutex::new(settings_manager)),
+            }),
+        })
     }
 
     /// 惰性获取全局服务。
@@ -83,9 +121,9 @@ impl AppServices {
         }
 
         // 惰性构造：释放读锁后异步加载，避免持锁阻塞。
-        let built = Self::from_inner(CoreInstanceService::new().await?);
+        let built = Self::from_inner_with_settings(CoreInstanceService::new().await?).await?;
 
-        // 注册：加写锁；若并发期间已有人注册，则复用其结果，丢弃本次构造。
+        // 注册：加写锁；若并发期间已有人注册,则复用其结果，丢弃本次构造。
         let mut guard = SERVICES.write().await;
         let inner = match guard.as_ref() {
             Some(existing) => existing.clone(),
@@ -152,6 +190,16 @@ impl AppServices {
         Ok(Self::get().await?.server().clone())
     }
 
+    /// 访问设置信息服务（`Arc` 共享句柄，clone 廉价）。
+    pub fn settings(&self) -> &Arc<CoreSettingsService> {
+        &self.inner.settings
+    }
+
+    /// 便捷访问入口：一步拿到设置信息服务的共享句柄（惰性初始化 + 可替换）。
+    pub async fn settings_service() -> Result<Arc<CoreSettingsService>, InstanceError> {
+        Ok(Self::get().await?.settings().clone())
+    }
+
     /// 访问服务器定时任务服务（`Arc` 共享句柄，clone 廉价）。
     pub fn cron(&self) -> &Arc<CoreCronTaskService> {
         &self.inner.cron
@@ -187,5 +235,13 @@ impl AppServices {
     /// 便捷访问入口：一步拿到系统资源信息服务的共享句柄（惰性初始化 + 可替换）。
     pub async fn system_service() -> Result<Arc<CoreSystemService>, InstanceError> {
         Ok(Self::get().await?.system().clone())
+    }
+
+    /// 访问设置管理器（异步互斥锁保护）。
+    pub fn settings_manager(&self) -> Result<&tokio::sync::Mutex<SettingsManager>, InstanceError> {
+        self.inner
+            .settings_manager
+            .as_ref()
+            .ok_or(InstanceError::Internal("settings manager not initialized".to_string()))
     }
 }

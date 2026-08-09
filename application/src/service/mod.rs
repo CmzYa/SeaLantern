@@ -8,10 +8,12 @@ mod cron;
 mod download;
 mod instance;
 mod server;
+mod settings;
 mod system;
 
 pub use cron::CoreCronTaskService;
 pub use download::CoreDownloadService;
 pub use instance::CoreInstanceService;
 pub use server::CoreServerService;
+pub use settings::CoreSettingsService;
 pub use system::CoreSystemService;
