@@ -66,11 +66,78 @@ pub fn build_router(services: AppServices, config: ViteConfig) -> Router {
         .route("/cron-tasks/{id}/enabled", put(handlers::set_cron_task_enabled))
         .route("/cron-tasks/{id}/run", post(handlers::run_cron_task));
 
+    let update_routes = Router::new().route("/update", get(handlers::check_update));
+
     Router::new()
         .nest(API_PREFIX, instance_routes)
         .nest(API_PREFIX, settings_routes)
         .nest(API_PREFIX, system_routes)
         .nest(API_PREFIX, cron_routes)
+        .nest(API_PREFIX, update_routes)
         .merge(spa_router(config))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use sealantern_application::service::CoreInstanceService;
+    use tempfile::{tempdir, TempDir};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn test_router() -> (Router, TempDir) {
+        let directory = tempdir().expect("create temporary directory");
+        let instance = CoreInstanceService::with_path(directory.path().join("instances.json"))
+            .await
+            .expect("create instance service");
+        (
+            build_router(AppServices::from_inner(instance), ViteConfig::default()),
+            directory,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn update_route_returns_snake_case_contract() {
+        let (router, _directory) = test_router().await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/update")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call update route");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("read update response");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse update response");
+        assert!(value.get("has_update").is_some());
+        assert!(value.get("latest_version").is_some());
+        assert!(value.get("hasUpdate").is_none());
+    }
+
+    #[tokio::test]
+    async fn update_route_rejects_post_requests() {
+        let (router, _directory) = test_router().await;
+
+        let response = router
+            .oneshot(
+                Request::post("/api/update")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call update route");
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
 }
