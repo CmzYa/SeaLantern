@@ -9,6 +9,9 @@ use super::JavaInfo;
 /// 每次配置结构变更时递增，由配置管理器据此执行数据迁移。
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
+/// 亚克力模糊级别的默认值，旧配置缺字段时回落到这里。
+pub const DEFAULT_ACRYLIC_BLUR_LEVEL: &str = "medium";
+
 /// 设置变更分组，用于调用方按组刷新状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingsGroup {
@@ -50,6 +53,7 @@ pub struct AppSettings {
     pub background_brightness: f32,
     pub background_size: String,
     pub acrylic_enabled: bool,
+    pub acrylic_blur_level: String,
     pub theme: String,
     pub color: String,
     pub font_size: u32,
@@ -96,6 +100,7 @@ impl Default for AppSettings {
             background_brightness: 1.0,
             background_size: "cover".into(),
             acrylic_enabled: false,
+            acrylic_blur_level: DEFAULT_ACRYLIC_BLUR_LEVEL.to_string(),
             theme: "auto".into(),
             color: "default".into(),
             font_size: 14,
@@ -154,6 +159,7 @@ impl AppSettings {
             || self.background_brightness != other.background_brightness
             || self.background_size != other.background_size
             || self.acrylic_enabled != other.acrylic_enabled
+            || self.acrylic_blur_level != other.acrylic_blur_level
             || self.theme != other.theme
             || self.color != other.color
             || self.font_size != other.font_size
@@ -188,5 +194,27 @@ impl AppSettings {
         }
 
         groups
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppSettings, SettingsGroup, DEFAULT_ACRYLIC_BLUR_LEVEL};
+
+    #[test]
+    fn legacy_settings_default_to_medium_acrylic_blur() {
+        let settings: AppSettings =
+            serde_json::from_str("{}").expect("legacy settings should load");
+
+        assert_eq!(settings.acrylic_blur_level, DEFAULT_ACRYLIC_BLUR_LEVEL);
+    }
+
+    #[test]
+    fn acrylic_blur_change_marks_appearance_group() {
+        let current = AppSettings::default();
+        let mut changed = current.clone();
+        changed.acrylic_blur_level = "high".into();
+
+        assert_eq!(current.changed_groups(&changed), vec![SettingsGroup::Appearance]);
     }
 }

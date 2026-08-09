@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import {
   settingsApi,
+  DEFAULT_ACRYLIC_BLUR_LEVEL,
   type AppSettings,
   type PartialSettings,
   type SettingsGroup,
@@ -44,6 +45,7 @@ export function getInitialFontSize(): number {
 
 const defaultSettings: AppSettings = {
   close_servers_on_exit: true,
+  close_servers_on_update: true,
   auto_accept_eula: false,
   default_max_memory: 4096,
   default_min_memory: 1024,
@@ -61,6 +63,7 @@ const defaultSettings: AppSettings = {
   background_brightness: 1.0,
   background_size: "cover",
   acrylic_enabled: false,
+  acrylic_blur_level: DEFAULT_ACRYLIC_BLUR_LEVEL,
   theme: "auto",
   font_size: 14,
   font_family: "",
@@ -100,6 +103,9 @@ export const useSettingsStore = defineStore("settings", () => {
   const theme = computed(() => settings.value.theme || "auto");
   const fontSize = computed(() => settings.value.font_size || 14);
   const acrylicEnabled = computed(() => settings.value.acrylic_enabled);
+  const acrylicBlurLevel = computed(
+    () => settings.value.acrylic_blur_level || DEFAULT_ACRYLIC_BLUR_LEVEL,
+  );
   const colorScheme = computed(() => settings.value.color || "default");
   const minimalMode = computed(() => settings.value.minimal_mode || false);
   const backgroundImage = computed(() =>
@@ -180,6 +186,7 @@ export const useSettingsStore = defineStore("settings", () => {
     theme,
     fontSize,
     acrylicEnabled,
+    acrylicBlurLevel,
     colorScheme,
     minimalMode,
     backgroundImage,
