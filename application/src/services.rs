@@ -68,9 +68,7 @@ impl AppServices {
         Self {
             inner: Arc::new(AppServicesInner {
                 background_started: AtomicBool::new(false),
-                download: Arc::new(
-                    CoreDownloadService::new().expect("failed to init download service"),
-                ),
+                download: Arc::new(CoreDownloadService::new()),
                 cron: Arc::new(CoreCronTaskService::new(server.clone())),
                 server,
                 instance,
