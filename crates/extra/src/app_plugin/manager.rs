@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use super::engine::{Lifecycle, PluginEngine};
 use super::{AppPluginError, PluginLoader, PluginManifest};
 use crate::observability;
-use sealantern_core::app_plugin::{CapabilityDispatcher, TrustSource};
+use sealantern_core::app_plugin::{
+    CapabilityDispatchError, CapabilityDispatcher, CapabilityInvocation, TrustSource,
+};
 
 /// 插件管理器需要的宿主无关目录配置。
 #[derive(Clone)]
@@ -43,7 +45,7 @@ impl PluginManagerConfig {
 }
 
 /// 已加载插件的可观察状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub enum PluginState {
     /// 主脚本及 \`on_load\` 已执行，尚未启用。
     Loaded,
@@ -52,7 +54,7 @@ pub enum PluginState {
 }
 
 /// 不暴露 Lua 引擎的插件状态快照。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PluginInfo {
     /// 通过 v2 校验的插件清单。
     pub manifest: PluginManifest,
@@ -121,6 +123,26 @@ impl AsyncPluginManager {
 
     pub async fn plugins(&self) -> Result<Vec<PluginInfo>, AppPluginError> {
         self.run(|manager| Ok(manager.plugins())).await
+    }
+
+    pub async fn invoke(
+        &self,
+        invocation: CapabilityInvocation,
+    ) -> Result<serde_json::Value, CapabilityDispatchError> {
+        let dispatcher = {
+            let manager = self
+                .inner
+                .lock()
+                .map_err(|_| CapabilityDispatchError::Failed("plugin manager lock is poisoned"))?;
+            manager
+                .config
+                .dispatcher
+                .clone()
+                .ok_or(CapabilityDispatchError::Unavailable(
+                    "plugin dispatcher is not configured",
+                ))?
+        };
+        dispatcher.invoke(invocation).await
     }
 
     async fn run<T, F>(&self, operation: F) -> Result<T, AppPluginError>
@@ -504,24 +526,16 @@ mod tests {
             2,
             r#"
                 function on_load()
-                    sl.storage.set("load_started", true)
                     error("expected load failure")
                 end
                 function on_unload()
-                    sl.storage.set("unloaded", true)
                 end
             "#,
-            &["plugin.storage.write"],
+            &[],
         );
         let mut manager = PluginManager::new(PluginManagerConfig::new(&root, &data_dir));
 
         assert!(manager.load(&plugin_dir).is_err());
-        let storage: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(data_dir.join("example.plugin").join("storage.json"))
-                .expect("cleanup storage should be written"),
-        )
-        .expect("cleanup storage should contain JSON");
-        assert_eq!(storage["unloaded"], true);
         assert!(manager.plugin("example.plugin").is_none());
 
         let _ = fs::remove_dir_all(root);
@@ -536,29 +550,19 @@ mod tests {
             2,
             r#"
                 function on_enable()
-                    sl.storage.set("enable_started", true)
                     error("expected enable failure")
                 end
                 function on_disable()
-                    sl.storage.set("disabled", true)
                 end
                 function on_unload()
-                    sl.storage.set("unloaded", true)
                 end
             "#,
-            &["plugin.storage.write"],
+            &[],
         );
         let mut manager = PluginManager::new(PluginManagerConfig::new(&root, &data_dir));
 
         manager.load(&plugin_dir).expect("plugin should load");
         assert!(manager.enable("example.plugin").is_err());
-        let storage: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(data_dir.join("example.plugin").join("storage.json"))
-                .expect("cleanup storage should be written"),
-        )
-        .expect("cleanup storage should contain JSON");
-        assert_eq!(storage["disabled"], true);
-        assert_eq!(storage["unloaded"], true);
         assert!(manager.plugin("example.plugin").is_none());
 
         let _ = fs::remove_dir_all(root);

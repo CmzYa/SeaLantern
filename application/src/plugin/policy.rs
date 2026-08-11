@@ -12,6 +12,10 @@ use uuid::Uuid;
 
 const TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_AUDIT_ROWS: i64 = 10_000;
+const MAX_SESSIONS: usize = 1_024;
+const MAX_SESSION_GRANTS: usize = 1_024;
+const MAX_SESSION_APPROVALS: usize = 1_024;
+const MAX_SESSION_TOKENS: usize = 1_024;
 
 /// 插件授权状态服务的错误。
 #[derive(Debug)]
@@ -21,6 +25,7 @@ pub enum PluginPolicyError {
     Denied(PolicyDenialReason),
     TokenExpired,
     TokenUnknown,
+    CapacityExceeded(&'static str),
 }
 
 impl std::fmt::Display for PluginPolicyError {
@@ -37,6 +42,9 @@ impl std::fmt::Display for PluginPolicyError {
             Self::TokenUnknown => {
                 formatter.write_str("plugin approval token is unknown or already used")
             }
+            Self::CapacityExceeded(subject) => {
+                write!(formatter, "plugin policy capacity exceeded: {subject}")
+            }
         }
     }
 }
@@ -50,7 +58,7 @@ impl From<PersistenceError> for PluginPolicyError {
 }
 
 /// 一条脱敏后的插件审计事件。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct AuditEntry {
     pub id: i64,
     pub plugin_id: String,
@@ -62,7 +70,7 @@ pub struct AuditEntry {
 }
 
 /// 会话授权记录。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SessionGrant {
     pub session_id: String,
     pub plugin_id: String,
@@ -71,7 +79,7 @@ pub struct SessionGrant {
 }
 
 /// 已签发的会话审批状态；token 只在内存中保存。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SessionApproval {
     pub session_id: String,
     pub plugin_id: String,
@@ -121,10 +129,11 @@ impl PluginPolicyStore {
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, PluginPolicyError> {
         let database = SqliteDatabase::open(path).await?;
         database
-            .migrate(vec![Migration {
-                version: 1,
-                name: "create plugin policy state",
-                sql: "CREATE TABLE IF NOT EXISTS plugin_policy_grants (\
+            .migrate(vec![
+                Migration {
+                    version: 1,
+                    name: "create plugin policy state",
+                    sql: "CREATE TABLE IF NOT EXISTS plugin_policy_grants (\
                     plugin_id TEXT NOT NULL,\
                     capability_id TEXT NOT NULL,\
                     scope_kind TEXT NOT NULL,\
@@ -153,7 +162,17 @@ impl PluginPolicyStore {
                     detail TEXT NOT NULL,\
                     created_at INTEGER NOT NULL\
                  );",
-            }])
+                },
+                Migration {
+                    version: 2,
+                    name: "bind plugin policy to bundle fingerprint",
+                    sql: "CREATE TABLE IF NOT EXISTS plugin_policy_bundles (\
+                    plugin_id TEXT PRIMARY KEY NOT NULL,\
+                    fingerprint TEXT NOT NULL,\
+                    updated_at INTEGER NOT NULL\
+                 );",
+                },
+            ])
             .await?;
         Ok(Self {
             database,
@@ -165,6 +184,60 @@ impl PluginPolicyStore {
         self.database.path()
     }
 
+    /// Binds policy state to the bundle that is about to execute plugin code.
+    /// A first observation deliberately invalidates legacy id-only state.
+    pub async fn reconcile_bundle(
+        &self,
+        plugin_id: &str,
+        fingerprint: &str,
+    ) -> Result<(), PluginPolicyError> {
+        validate_plugin_id(plugin_id)?;
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(PluginPolicyError::InvalidInput("bundle fingerprint"));
+        }
+        let rows = self
+            .database
+            .query(
+                "SELECT fingerprint FROM plugin_policy_bundles WHERE plugin_id=?1",
+                params(vec![text(plugin_id)]),
+                |row| row.get::<_, String>(0),
+            )
+            .await?;
+        if rows.first().is_some_and(|stored| stored == fingerprint) {
+            return Ok(());
+        }
+
+        let timestamp = now();
+        self.database
+            .execute(
+                "UPDATE plugin_policy_grants SET revoked_at=?2 WHERE plugin_id=?1 AND revoked_at IS NULL",
+                params(vec![text(plugin_id), SqlValue::Integer(timestamp)]),
+            )
+            .await?;
+        self.database
+            .execute(
+                "DELETE FROM plugin_policy_trust WHERE plugin_id=?1",
+                params(vec![text(plugin_id)]),
+            )
+            .await?;
+        self.database
+            .execute(
+                "INSERT INTO plugin_policy_plugins(plugin_id, enabled, updated_at) VALUES(?1, 0, ?2) \
+                 ON CONFLICT(plugin_id) DO UPDATE SET enabled=0, updated_at=excluded.updated_at",
+                params(vec![text(plugin_id), SqlValue::Integer(timestamp)]),
+            )
+            .await?;
+        self.database
+            .execute(
+                "INSERT INTO plugin_policy_bundles(plugin_id, fingerprint, updated_at) VALUES(?1, ?2, ?3) \
+                 ON CONFLICT(plugin_id) DO UPDATE SET fingerprint=excluded.fingerprint, updated_at=excluded.updated_at",
+                params(vec![text(plugin_id), text(fingerprint), SqlValue::Integer(timestamp)]),
+            )
+            .await?;
+        self.clear_plugin_session_state(plugin_id).await;
+        Ok(())
+    }
+
     /// 写入或恢复一个持久能力授权。
     pub async fn grant_persistent(
         &self,
@@ -173,6 +246,7 @@ impl PluginPolicyStore {
         scope: Option<&ScopeBinding>,
     ) -> Result<(), PluginPolicyError> {
         validate_ids(plugin_id, capability_id)?;
+        validate_scope(scope)?;
         let (kind, value) = scope_columns(scope);
         self.database
             .execute(
@@ -199,6 +273,7 @@ impl PluginPolicyStore {
         scope: Option<&ScopeBinding>,
     ) -> Result<(), PluginPolicyError> {
         validate_ids(plugin_id, capability_id)?;
+        validate_scope(scope)?;
         let (kind, value) = scope_columns(scope);
         self.database
             .execute(
@@ -284,16 +359,20 @@ impl PluginPolicyStore {
     /// 为当前会话授予临时能力。
     pub async fn grant_session(&self, grant: SessionGrant) -> Result<(), PluginPolicyError> {
         validate_ids(&grant.plugin_id, &grant.capability_id)?;
+        validate_session_id(&grant.session_id)?;
+        validate_scope(grant.scope.as_ref())?;
         let mut sessions = self.sessions.lock().await;
-        sessions
-            .entry(grant.session_id)
-            .or_default()
-            .grants
-            .insert(SessionGrantKey {
-                plugin_id: grant.plugin_id,
-                capability_id: grant.capability_id,
-                scope: grant.scope,
-            });
+        cleanup_sessions(&mut sessions);
+        let session = session_state(&mut sessions, &grant.session_id)?;
+        let key = SessionGrantKey {
+            plugin_id: grant.plugin_id,
+            capability_id: grant.capability_id,
+            scope: grant.scope,
+        };
+        if !session.grants.contains(&key) && session.grants.len() >= MAX_SESSION_GRANTS {
+            return Err(PluginPolicyError::CapacityExceeded("session grants"));
+        }
+        session.grants.insert(key);
         Ok(())
     }
 
@@ -302,14 +381,20 @@ impl PluginPolicyStore {
         approval: SessionApproval,
     ) -> Result<(), PluginPolicyError> {
         validate_ids(&approval.plugin_id, &approval.capability_id)?;
+        validate_session_id(&approval.session_id)?;
+        validate_scope(approval.scope.as_ref())?;
         let mut sessions = self.sessions.lock().await;
-        let session = sessions.entry(approval.session_id).or_default();
+        cleanup_sessions(&mut sessions);
+        let session = session_state(&mut sessions, &approval.session_id)?;
         let key = SessionApprovalKey {
             plugin_id: approval.plugin_id,
             capability_id: approval.capability_id,
             scope: approval.scope.clone(),
         };
-        session.approvals.insert(key.clone());
+        if !session.approvals.contains(&key) && session.approvals.len() >= MAX_SESSION_APPROVALS {
+            return Err(PluginPolicyError::CapacityExceeded("session approvals"));
+        }
+        session.approvals.insert(key);
         Ok(())
     }
 
@@ -322,23 +407,34 @@ impl PluginPolicyStore {
         scope: Option<ScopeBinding>,
     ) -> Result<String, PluginPolicyError> {
         validate_ids(plugin_id, capability_id)?;
+        validate_session_id(session_id)?;
+        validate_scope(scope.as_ref())?;
         let token = Uuid::new_v4().to_string();
         let mut sessions = self.sessions.lock().await;
-        sessions
-            .entry(session_id.to_owned())
-            .or_default()
-            .tokens
-            .insert(
-                token.clone(),
-                ApprovalToken {
-                    session_id: session_id.to_owned(),
-                    plugin_id: plugin_id.to_owned(),
-                    capability_id: capability_id.to_owned(),
-                    scope,
-                    expires_at: SystemTime::now() + TOKEN_TTL,
-                },
-            );
+        cleanup_sessions(&mut sessions);
+        let session = session_state(&mut sessions, session_id)?;
+        if session.tokens.len() >= MAX_SESSION_TOKENS {
+            return Err(PluginPolicyError::CapacityExceeded("session approval tokens"));
+        }
+        session.tokens.insert(
+            token.clone(),
+            ApprovalToken {
+                session_id: session_id.to_owned(),
+                plugin_id: plugin_id.to_owned(),
+                capability_id: capability_id.to_owned(),
+                scope,
+                expires_at: SystemTime::now() + TOKEN_TTL,
+            },
+        );
         Ok(token)
+    }
+
+    /// 清除一项会话中的所有临时授权和审批材料。
+    pub async fn end_session(&self, session_id: &str) -> Result<(), PluginPolicyError> {
+        validate_session_id(session_id)?;
+        let mut sessions = self.sessions.lock().await;
+        sessions.remove(session_id);
+        Ok(())
     }
 
     /// 消费单次 token；不匹配、过期或重复使用均失败。
@@ -350,7 +446,10 @@ impl PluginPolicyStore {
         capability_id: &str,
         scope: Option<&ScopeBinding>,
     ) -> Result<(), PluginPolicyError> {
+        validate_session_id(session_id)?;
+        validate_scope(scope)?;
         let mut sessions = self.sessions.lock().await;
+        cleanup_sessions(&mut sessions);
         let session = sessions
             .get_mut(session_id)
             .ok_or(PluginPolicyError::TokenUnknown)?;
@@ -381,6 +480,11 @@ impl PluginPolicyStore {
         declared: bool,
         single_use_approved: bool,
     ) -> Result<PolicyDecision, PluginPolicyError> {
+        validate_ids(plugin_id, capability_id)?;
+        validate_scope(scope)?;
+        if let Some(session_id) = session_id {
+            validate_session_id(session_id)?;
+        }
         if !self.is_enabled(plugin_id).await? {
             return Ok(PolicyDecision::Deny(PolicyDenialReason::PluginNotEnabled));
         }
@@ -532,11 +636,25 @@ impl PluginPolicyStore {
             .await?;
         self.database
             .execute(
-                "DELETE FROM plugin_policy_audit WHERE id NOT IN (SELECT id FROM plugin_policy_audit ORDER BY id DESC LIMIT ?1)",
+                "DELETE FROM plugin_policy_audit WHERE id <= COALESCE((\
+                    SELECT id FROM plugin_policy_audit ORDER BY id DESC LIMIT 1 OFFSET ?1\
+                 ), 0)",
                 params(vec![SqlValue::Integer(MAX_AUDIT_ROWS)]),
             )
             .await?;
         Ok(())
+    }
+
+    async fn clear_plugin_session_state(&self, plugin_id: &str) {
+        let mut sessions = self.sessions.lock().await;
+        sessions.retain(|_, state| {
+            state.grants.retain(|grant| grant.plugin_id != plugin_id);
+            state
+                .approvals
+                .retain(|approval| approval.plugin_id != plugin_id);
+            state.tokens.retain(|_, token| token.plugin_id != plugin_id);
+            !state.grants.is_empty() || !state.approvals.is_empty() || !state.tokens.is_empty()
+        });
     }
 }
 
@@ -557,6 +675,39 @@ fn validate_plugin_id(plugin_id: &str) -> Result<(), PluginPolicyError> {
         return Err(PluginPolicyError::InvalidInput("plugin_id"));
     }
     Ok(())
+}
+
+fn validate_session_id(session_id: &str) -> Result<(), PluginPolicyError> {
+    if session_id.is_empty() || session_id.len() > 128 || session_id.chars().any(char::is_control) {
+        return Err(PluginPolicyError::InvalidInput("session_id"));
+    }
+    Ok(())
+}
+
+fn validate_scope(scope: Option<&ScopeBinding>) -> Result<(), PluginPolicyError> {
+    if let Some(scope) = scope {
+        ScopeBinding::new(scope.kind, &scope.value)
+            .map_err(|_| PluginPolicyError::InvalidInput("scope"))?;
+    }
+    Ok(())
+}
+
+fn cleanup_sessions(sessions: &mut HashMap<String, SessionState>) {
+    let now = SystemTime::now();
+    sessions.retain(|_, session| {
+        session.tokens.retain(|_, token| token.expires_at > now);
+        !session.grants.is_empty() || !session.approvals.is_empty() || !session.tokens.is_empty()
+    });
+}
+
+fn session_state<'a>(
+    sessions: &'a mut HashMap<String, SessionState>,
+    session_id: &str,
+) -> Result<&'a mut SessionState, PluginPolicyError> {
+    if !sessions.contains_key(session_id) && sessions.len() >= MAX_SESSIONS {
+        return Err(PluginPolicyError::CapacityExceeded("sessions"));
+    }
+    Ok(sessions.entry(session_id.to_owned()).or_default())
 }
 
 fn scope_columns(scope: Option<&ScopeBinding>) -> (String, String) {
@@ -620,15 +771,66 @@ fn parse_trust(value: &str) -> Result<TrustSource, PluginPolicyError> {
     }
 }
 
+const SENSITIVE_AUDIT_KEYS: [&str; 6] =
+    ["password", "token", "secret", "authorization", "cookie", "private_key"];
+
 fn redact_detail(value: &str) -> String {
-    ["password", "token", "secret", "authorization", "cookie", "private_key"]
+    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(value) {
+        redact_json(&mut json);
+        return serde_json::to_string(&json).unwrap_or_else(|_| "<redacted json>".to_owned());
+    }
+    value
+        .split_inclusive(is_audit_pair_delimiter)
+        .map(redact_text_segment)
+        .collect()
+}
+
+fn redact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if is_sensitive_audit_key(key) {
+                    *value = serde_json::Value::String("<redacted>".to_owned());
+                } else {
+                    redact_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_json),
+        _ => {}
+    }
+}
+
+fn redact_text_segment(segment: &str) -> String {
+    let suffix_len = segment
+        .chars()
+        .last()
+        .filter(|value| is_audit_pair_delimiter(*value))
+        .map_or(0, char::len_utf8);
+    let (body, suffix) = segment.split_at(segment.len() - suffix_len);
+    let Some((index, separator)) = body
+        .char_indices()
+        .find(|(_, value)| matches!(value, '=' | ':'))
+    else {
+        return segment.to_owned();
+    };
+    let key = &body[..index];
+    if !is_sensitive_audit_key(key.trim_matches(|value: char| {
+        value.is_ascii_whitespace() || matches!(value, '\"' | '\'' | '{' | '}')
+    })) {
+        return segment.to_owned();
+    }
+    format!("{key}{separator}<redacted>{suffix}")
+}
+
+fn is_audit_pair_delimiter(value: char) -> bool {
+    matches!(value, '&' | ';' | ',' | '\r' | '\n')
+}
+
+fn is_sensitive_audit_key(value: &str) -> bool {
+    SENSITIVE_AUDIT_KEYS
         .iter()
-        .fold(value.to_owned(), |value, key| {
-            value
-                .split_once('=')
-                .filter(|(left, _)| left.trim().eq_ignore_ascii_case(key))
-                .map_or(value.clone(), |(left, _)| format!("{left}=<redacted>"))
-        })
+        .any(|key| value.eq_ignore_ascii_case(key))
 }
 
 fn text(value: &str) -> SqlValue {
@@ -692,6 +894,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changed_bundle_does_not_inherit_policy_state() {
+        let database = path("bundle-identity");
+        let store = PluginPolicyStore::open(&database).await.unwrap();
+        store
+            .reconcile_bundle("example.plugin", &"a".repeat(64))
+            .await
+            .unwrap();
+        store
+            .grant_persistent("example.plugin", "server.status.read", Some(&scope()))
+            .await
+            .unwrap();
+        store
+            .set_trust("example.plugin", TrustSource::LocallyTrusted)
+            .await
+            .unwrap();
+        store.set_enabled("example.plugin", true).await.unwrap();
+        store
+            .grant_session(SessionGrant {
+                session_id: "session-1".to_owned(),
+                plugin_id: "example.plugin".to_owned(),
+                capability_id: "server.status.read".to_owned(),
+                scope: Some(scope()),
+            })
+            .await
+            .unwrap();
+        let token = store
+            .issue_single_use_token(
+                "session-1",
+                "example.plugin",
+                "server.status.read",
+                Some(scope()),
+            )
+            .await
+            .unwrap();
+
+        store
+            .reconcile_bundle("example.plugin", &"b".repeat(64))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.trust_source("example.plugin").await.unwrap(),
+            TrustSource::UntrustedLocal
+        );
+        assert!(!store.is_enabled("example.plugin").await.unwrap());
+        assert!(!store
+            .has_persistent_grant("example.plugin", "server.status.read", Some(&scope()))
+            .await
+            .unwrap());
+        assert!(matches!(
+            store
+                .consume_single_use_token(
+                    "session-1",
+                    &token,
+                    "example.plugin",
+                    "server.status.read",
+                    Some(&scope())
+                )
+                .await,
+            Err(PluginPolicyError::TokenUnknown)
+        ));
+        cleanup(database);
+    }
+
+    #[tokio::test]
     async fn single_use_token_is_bound_and_consumed_once() {
         let database = path("token");
         let store = PluginPolicyStore::open(&database).await.unwrap();
@@ -742,6 +1009,18 @@ mod tests {
         assert_eq!(entries[0].detail, "token=<redacted>");
         assert!(CapabilityId::new("plugin.log.emit").is_ok());
         cleanup(database);
+    }
+
+    #[test]
+    fn audit_detail_redacts_json_headers_and_query_pairs() {
+        let json = redact_detail(r#"{"token":"secret","nested":{"password":"hidden"}}"#);
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("hidden"));
+        assert!(json.contains("<redacted>"));
+        assert_eq!(
+            redact_detail("Authorization: Bearer secret;token=another&public=value"),
+            "Authorization:<redacted>;token=<redacted>&public=value"
+        );
     }
 
     fn cleanup(path: PathBuf) {
