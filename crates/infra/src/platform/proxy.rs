@@ -58,7 +58,16 @@ impl SystemProxyProvider for PlatformSystemProxyProvider {
 
 /// 读取当前平台此刻报告的系统代理快照。
 pub fn current_system_proxy() -> Result<SystemProxySnapshot, SystemProxyReadError> {
-    crate::net::proxy::read_system_proxy(&PlatformSystemProxyProvider)
+    let snapshot = crate::net::proxy::read_system_proxy(&PlatformSystemProxyProvider)?;
+    let routes = snapshot.routes();
+    tracing::debug!(
+        target: "sealantern.infra.platform.proxy",
+        http_proxy = routes.http_proxy().is_some(),
+        https_proxy = routes.https_proxy().is_some(),
+        bypass_rules = routes.no_proxy().len(),
+        "system proxy snapshot loaded"
+    );
+    Ok(snapshot)
 }
 
 #[cfg(target_os = "windows")]
@@ -104,6 +113,14 @@ fn platform_system_proxy() -> Result<SystemProxySnapshot, SystemProxyReadError> 
 fn snapshot_from_sysproxy(
     proxy: &sysproxy::Sysproxy,
 ) -> Result<SystemProxySnapshot, SystemProxyReadError> {
+    tracing::debug!(
+        target: "sealantern.infra.platform.proxy",
+        enabled = proxy.enable,
+        host = diagnostic_proxy_host(&proxy.host),
+        port = proxy.port,
+        bypass_bytes = proxy.bypass.len(),
+        "raw platform proxy settings loaded"
+    );
     if !proxy.enable {
         return Ok(SystemProxySnapshot::direct());
     }
@@ -115,6 +132,15 @@ fn snapshot_from_sysproxy(
     Ok(SystemProxySnapshot::from_routes(
         ProxyRoutes::all(proxy_url).with_no_proxy(no_proxy),
     ))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn diagnostic_proxy_host(host: &str) -> &str {
+    if host.contains('@') {
+        "<redacted>"
+    } else {
+        host
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -181,7 +207,7 @@ fn convert_bypass_rules(bypass: &str) -> (Vec<String>, usize) {
 
 fn report_skipped_bypass_rules(skipped: usize) {
     if skipped > 0 {
-        tracing::warn!(
+        tracing::debug!(
             target: "sealantern.infra.platform.proxy",
             skipped_rules = skipped,
             "system proxy bypass rules could not be represented exactly"
@@ -232,6 +258,13 @@ mod tests {
         let snapshot = snapshot_from_sysproxy(&enabled_proxy("proxy.example.com", 80, "")).unwrap();
 
         assert_eq!(snapshot.routes().http_proxy(), Some("http://proxy.example.com:80"));
+    }
+
+    #[test]
+    fn diagnostic_host_preserves_normal_hosts_and_redacts_possible_userinfo() {
+        assert_eq!(diagnostic_proxy_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(diagnostic_proxy_host("proxy.example.com"), "proxy.example.com");
+        assert_eq!(diagnostic_proxy_host("user:password@proxy.example.com"), "<redacted>");
     }
 
     #[test]
