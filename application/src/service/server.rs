@@ -22,25 +22,26 @@ use sealantern_core::instance::{
 };
 use sealantern_core::process::{
     build_command, CommandBuildMode, CommandBuildRequest, Daemon, JavaEnvironment, Terminal,
-    TerminalOutput, TerminalStream, WindowsConsoleEncoding,
+    TerminalStream, WindowsConsoleEncoding,
 };
 use sealantern_interface::server::{ServerSnapshot, ServerState};
-use sealantern_interface::{InstanceService, ServerService, ServerServiceError};
+use sealantern_interface::{InstanceService, ServerService, ServerServiceError, SettingsService};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::error::ServerError;
 
-use super::CoreInstanceService;
+use super::{CoreInstanceService, CoreSettingsService, LogRecorder};
 
 /// 优雅停止时等待进程退出的最长时长。
 const STOP_GRACEFUL_TIMEOUT: Duration = Duration::from_secs(10);
 /// 状态轮询间隔。
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// 一个受管服务器进程：守护进程 + 已转移的标准流终端。
+/// 一个受管服务器进程：守护进程 + 已转移的标准流终端 + 日志记录管线。
 struct ManagedProcess {
     daemon: Daemon,
     terminal: Terminal,
+    recorder: Option<LogRecorder>,
 }
 
 struct ServerRestartDriver<'a> {
@@ -97,6 +98,8 @@ impl InstanceRestartDriver for ServerRestartDriver<'_> {
 pub struct CoreServerService {
     /// 实例记录服务（读取启动配置与更新状态）。
     instance_service: Arc<CoreInstanceService>,
+    /// 设置信息服务（读取控制台等全局配置）。
+    settings_service: Arc<CoreSettingsService>,
     /// 进程注册表：实例 ID → 受管进程。
     processes: Mutex<HashMap<String, ManagedProcess>>,
     /// 启动中的实例集合。
@@ -109,9 +112,13 @@ pub struct CoreServerService {
 
 impl CoreServerService {
     /// 构造服务器进程管理服务。
-    pub fn new(instance_service: Arc<CoreInstanceService>) -> Self {
+    pub fn new(
+        instance_service: Arc<CoreInstanceService>,
+        settings_service: Arc<CoreSettingsService>,
+    ) -> Self {
         Self {
             instance_service,
+            settings_service,
             processes: Mutex::new(HashMap::new()),
             starting: Mutex::new(HashSet::new()),
             stopping: Mutex::new(HashSet::new()),
@@ -148,6 +155,44 @@ impl CoreServerService {
                 source: Box::new(std::io::Error::other(format!("instance lookup failed: {e}"))),
             })?
             .ok_or(ServerError::InstanceNotFound)
+    }
+
+    /// 从进程表中移除指定实例的受管进程并取出日志管线（不检查状态）。
+    ///
+    /// 供强制终止等"无论进程状态都移除"的路径使用；锁只取一次。
+    fn take_recorder_unconditional(
+        &self,
+        id: &str,
+    ) -> Result<Option<LogRecorder>, ServerServiceError> {
+        let mut processes = self.processes_lock()?;
+        Ok(processes
+            .remove(id)
+            .and_then(|mut managed| managed.recorder.take()))
+    }
+
+    /// 若实例进程已退出，移除受管进程并取出日志管线；否则返回 `None`。
+    ///
+    /// 供轮询确认退出后的清理路径使用；进程仍在运行时不移除，锁只取一次。
+    fn take_recorder_after_exit(
+        &self,
+        id: &str,
+    ) -> Result<Option<LogRecorder>, ServerServiceError> {
+        let mut processes = self.processes_lock()?;
+        let Some(managed) = processes.get_mut(id) else {
+            return Ok(None);
+        };
+        if managed
+            .daemon
+            .poll()
+            .map(|status| status.is_some())
+            .unwrap_or(true)
+        {
+            Ok(processes
+                .remove(id)
+                .and_then(|mut managed| managed.recorder.take()))
+        } else {
+            Ok(None)
+        }
     }
 
     /// 由实例启动配置构建进程命令。
@@ -254,23 +299,18 @@ impl CoreServerService {
     ) -> Result<ServerSnapshot, ServerServiceError> {
         let id_str = instance.id.as_str().to_owned();
         let started_at = instance.last_started_at_unix_secs;
+        if let Some(recorder) = self.take_recorder_after_exit(&id_str)? {
+            spawn_recorder_shutdown(Some(recorder));
+            return Ok(ServerSnapshot {
+                instance_id: id_str,
+                state: ServerState::Stopped,
+                pid: None,
+                uptime_secs: None,
+                error_message: None,
+            });
+        }
         let mut processes = self.processes_lock()?;
         if let Some(managed) = processes.get_mut(&id_str) {
-            let is_running = managed
-                .daemon
-                .poll()
-                .map(|status| status.is_none())
-                .unwrap_or(false);
-            if !is_running {
-                processes.remove(&id_str);
-                return Ok(ServerSnapshot {
-                    instance_id: id_str,
-                    state: ServerState::Stopped,
-                    pid: None,
-                    uptime_secs: None,
-                    error_message: None,
-                });
-            }
             let state = if self.is_stopping(&id_str) {
                 ServerState::Stopping
             } else if self.is_starting(&id_str) {
@@ -355,14 +395,17 @@ impl CoreServerService {
     ) -> Result<(), ServerServiceError> {
         let id_str = id.as_str().to_string();
 
+        // 清理残留进程：若旧进程仍在运行则拒绝启动，否则收敛旧日志管线。
         {
             let mut processes = self.processes_lock()?;
             if let Some(managed) = processes.get_mut(&id_str) {
                 if managed.daemon.poll().map(|s| s.is_none()).unwrap_or(false) {
                     return Err(ServerError::InvalidState.into());
                 }
-                processes.remove(&id_str);
             }
+        }
+        if let Some(recorder) = self.take_recorder_after_exit(&id_str)? {
+            spawn_recorder_shutdown(Some(recorder));
         }
 
         let mut command = match self.build_process_command(instance) {
@@ -397,7 +440,7 @@ impl CoreServerService {
 
         self.mark_starting(&id_str);
         self.processes_lock()?
-            .insert(id_str.clone(), ManagedProcess { daemon, terminal });
+            .insert(id_str.clone(), ManagedProcess { daemon, terminal, recorder: None });
 
         // 启动元数据持久化失败时回滚进程，保证返回失败即没有运行中的新进程。
         if let Err(error) = self.instance_service.update_last_started(id).await {
@@ -422,11 +465,34 @@ impl CoreServerService {
             .into());
         }
 
-        // 后台读取进程输出，避免管道阻塞（当前先消费，后续接入日志管线）。
+        // 启动日志记录管线：读取 stdout / stderr，落库并推送实时事件。
+        let (stdout, stderr) = {
+            let mut processes = self.processes_lock()?;
+            let Some(managed) = processes.get_mut(&id_str) else {
+                return Err(ServerError::InvalidState.into());
+            };
+            (
+                managed.terminal.take_output(TerminalStream::Stdout),
+                managed.terminal.take_output(TerminalStream::Stderr),
+            )
+        };
+        // 控制台空行策略来自全局设置（读取失败时回落到默认丢弃）。
+        let drop_empty_line = self
+            .settings_service
+            .get()
+            .await
+            .map(|settings| settings.console_drop_empty_line)
+            .unwrap_or(true);
+        let recorder = LogRecorder::start(
+            id_str.clone(),
+            &instance.directory,
+            stdout,
+            stderr,
+            drop_empty_line,
+        )
+        .await;
         if let Some(managed) = self.processes_lock()?.get_mut(&id_str) {
-            let stdout = managed.terminal.take_output(TerminalStream::Stdout);
-            let stderr = managed.terminal.take_output(TerminalStream::Stderr);
-            spawn_output_reader(id_str.clone(), stdout, stderr);
+            managed.recorder = Some(recorder);
         }
 
         // 进程已成功拉起并注册，退出 Starting 状态（Starting 仅覆盖 spawn 竞态窗口）。
@@ -444,18 +510,28 @@ impl CoreServerService {
 
         let deadline = Instant::now() + STOP_GRACEFUL_TIMEOUT;
         loop {
-            {
+            // 单次锁内完成"判断退出 → 移除 → 取出日志管线"，避免重复取锁。
+            let recorder = {
                 let mut processes = self.processes_lock()?;
-                if let Some(managed) = processes.get_mut(&id_str) {
-                    if managed.daemon.poll().map(|s| s.is_some()).unwrap_or(true) {
-                        processes.remove(&id_str);
+                let exited = match processes.get_mut(&id_str) {
+                    Some(managed) => managed.daemon.poll().map(|s| s.is_some()).unwrap_or(true),
+                    None => {
                         self.clear_stopping(&id_str);
                         return Ok(());
                     }
+                };
+                if exited {
+                    processes
+                        .remove(&id_str)
+                        .and_then(|mut managed| managed.recorder.take())
                 } else {
-                    self.clear_stopping(&id_str);
-                    return Ok(());
+                    None // 进程仍在运行。
                 }
+            };
+            if let Some(recorder) = recorder {
+                self.clear_stopping(&id_str);
+                recorder.shutdown().await;
+                return Ok(());
             }
             if Instant::now() >= deadline {
                 break;
@@ -463,15 +539,21 @@ impl CoreServerService {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
 
-        // 超时：强制终止进程树。
-        let mut processes = self.processes_lock()?;
-        if let Some(mut managed) = processes.remove(&id_str) {
-            if let Err(error) = managed.daemon.terminate_tree() {
-                processes.insert(id_str.clone(), managed);
-                return Err(ServerError::OperationFailed { source: Box::new(error) }.into());
+        // 超时：强制终止进程树；失败时保留受管进程原状并返回错误。
+        {
+            let mut processes = self.processes_lock()?;
+            if let Some(managed) = processes.get_mut(&id_str) {
+                if let Err(error) = managed.daemon.terminate_tree() {
+                    return Err(ServerError::OperationFailed { source: Box::new(error) }.into());
+                }
             }
         }
+        // 终止成功后统一移除受管进程并收敛日志管线。
+        let recorder = self.take_recorder_unconditional(&id_str)?;
         self.clear_stopping(&id_str);
+        if let Some(recorder) = recorder {
+            recorder.shutdown().await;
+        }
         Ok(())
     }
 
@@ -484,6 +566,8 @@ impl CoreServerService {
                 processes.insert(id_str.clone(), managed);
                 return Err(ServerError::OperationFailed { source: Box::new(error) }.into());
             }
+            let recorder = managed.recorder.take();
+            spawn_recorder_shutdown(recorder);
         }
         self.clear_lifecycle_flags(&id_str);
         Ok(())
@@ -520,41 +604,16 @@ impl CoreServerService {
     }
 }
 
-/// 后台读取进程输出流，防止管道阻塞。
+/// 后台收敛日志记录管线（供同步清理路径使用）。
 ///
-/// 当前仅消费输出；后续接入日志管线（SQLite / 流式推送）时在此扩展。
-fn spawn_output_reader(
-    instance_id: String,
-    stdout: Option<TerminalOutput>,
-    stderr: Option<TerminalOutput>,
-) {
-    std::thread::spawn(move || {
-        let mut readers: Vec<TerminalOutput> = stdout.into_iter().chain(stderr).collect();
-
-        while !readers.is_empty() {
-            let mut next = Vec::with_capacity(readers.len());
-            for mut reader in readers {
-                let mut buffer = [0u8; 4096];
-                match std::io::Read::read(&mut reader, &mut buffer) {
-                    Ok(0) => {} // EOF：丢弃该流。
-                    Ok(n) => {
-                        // 当前仅消费输出以防管道阻塞；debug 级记录便于诊断进程问题。
-                        let text = String::from_utf8_lossy(&buffer[..n]);
-                        tracing::debug!(
-                            target: "sealantern.application.server",
-                            instance_id,
-                            output = %text.trim_end(),
-                            "server process output"
-                        );
-                        next.push(reader);
-                    }
-                    Err(_) => {} // 读取错误：丢弃该流。
-                }
-            }
-            readers = next;
-            std::thread::sleep(POLL_INTERVAL);
-        }
-    });
+/// 进程退出后读取任务会随 EOF 结束，这里只负责 flush 剩余批次；
+/// 后台执行以避免在同步调用链中引入异步等待。
+fn spawn_recorder_shutdown(recorder: Option<LogRecorder>) {
+    if let Some(recorder) = recorder {
+        tokio::spawn(async move {
+            recorder.shutdown().await;
+        });
+    }
 }
 
 /// 当前 Unix 时间戳（秒）。
@@ -598,7 +657,7 @@ mod tests {
 
     use sealantern_core::instance::InstanceId;
 
-    use super::{CoreInstanceService, CoreServerService};
+    use super::{CoreInstanceService, CoreServerService, CoreSettingsService};
 
     fn registry_path() -> PathBuf {
         let nonce = SystemTime::now()
@@ -616,7 +675,8 @@ mod tests {
         let instances = CoreInstanceService::with_path(&path)
             .await
             .expect("instance service");
-        let service = CoreServerService::new(Arc::new(instances));
+        let service =
+            CoreServerService::new(Arc::new(instances), Arc::new(CoreSettingsService::new()));
         let first = InstanceId::new("first").expect("first id");
         let second = InstanceId::new("second").expect("second id");
 
