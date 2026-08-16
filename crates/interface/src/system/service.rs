@@ -26,4 +26,9 @@ pub trait SystemService: Send + Sync {
 
     /// 计算目录磁盘占用。
     async fn directory_usage(&self, path: &Path) -> Result<DirectoryUsage, SystemServiceError>;
+
+    /// 获取默认运行路径。
+    ///
+    /// 路径优先级：标准数据目录 → 文档目录 → 当前工作目录。
+    async fn default_run_path(&self) -> Result<String, SystemServiceError>;
 }

@@ -54,3 +54,13 @@ pub async fn directory_usage(
         .map(Json)
         .map_err(HttpError::from)
 }
+
+/// `GET /api/system/default-run-path` — 获取默认运行路径。
+pub async fn default_run_path(State(state): State<AppState>) -> Result<Json<String>, HttpError> {
+    state
+        .system()
+        .default_run_path()
+        .await
+        .map(Json)
+        .map_err(HttpError::from)
+}

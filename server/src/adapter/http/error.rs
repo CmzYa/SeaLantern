@@ -203,6 +203,11 @@ impl HttpError {
                 code: "system_operation_failed",
                 message: error.to_string(),
             },
+            SystemServiceError::DefaultRunPathUnresolved => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "default_run_path_unresolved",
+                message: error.to_string(),
+            },
             SystemServiceError::Unsupported => Self {
                 status: StatusCode::NOT_IMPLEMENTED,
                 code: "operation_unsupported",

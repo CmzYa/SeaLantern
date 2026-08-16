@@ -13,7 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sealantern_infra::platform::{
     collect_disks, collect_networks, collect_process_usage, collect_resource_snapshot,
-    collect_system_info, cpu_brand_name, directory_size, path_disk_capacity, process_count,
+    collect_system_info, cpu_brand_name, directory_size, get_default_run_path, path_disk_capacity,
+    process_count,
 };
 use sealantern_interface::system::{
     CpuInfo, DirectoryUsage, DiskInfo, DiskSummary, MemoryInfo, NetworkInfo, ProcessResourceUsage,
@@ -190,6 +191,18 @@ impl CoreSystemService {
             usage: percent(used, total_effective),
         })
     }
+
+    /// 解析默认运行路径，返回应用层主错误。
+    async fn default_run_path_inner() -> Result<String, SystemError> {
+        get_default_run_path()
+            .map(|path| path.to_string_lossy().to_string())
+            .map_err(|error| match error {
+                sealantern_infra::platform::PlatformError::ResolveDefaultRunPath { source } => {
+                    SystemError::DefaultRunPathUnresolved { source }
+                }
+                _ => SystemError::Unsupported,
+            })
+    }
 }
 
 #[async_trait]
@@ -204,6 +217,10 @@ impl SystemService for CoreSystemService {
 
     async fn directory_usage(&self, path: &Path) -> Result<DirectoryUsage, SystemServiceError> {
         Self::directory_usage_inner(path).await.map_err(Into::into)
+    }
+
+    async fn default_run_path(&self) -> Result<String, SystemServiceError> {
+        Self::default_run_path_inner().await.map_err(Into::into)
     }
 }
 
@@ -260,5 +277,17 @@ mod tests {
             .await;
 
         assert_eq!(result, Err(SystemServiceError::PathNotFound));
+    }
+
+    #[tokio::test]
+    async fn default_run_path_resolves_to_sea_lantern_dir() {
+        let service = CoreSystemService;
+        let path = service.default_run_path().await.expect("default run path");
+
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .expect("path should have a file name")
+            .to_string_lossy();
+        assert_eq!(name, "SeaLantern", "unexpected default run dir: {name}");
     }
 }
