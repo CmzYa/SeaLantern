@@ -108,9 +108,9 @@ async function fetchCurseForge(
   const url = new URL(CURSEFORGE_SEARCH_URL);
   url.searchParams.set("gameId", CURSEFORGE_GAME_ID.toString());
   url.searchParams.set("pageSize", limit.toString());
-  url.searchParams.set("searchFilter", "mod");
+  // searchFilter 才是 CurseForge 的关键词搜索参数,直接传入查询词(原先误用了不存在的 search 参数,导致查询被忽略)
   if (query) {
-    url.searchParams.set("search", query);
+    url.searchParams.set("searchFilter", query);
   }
   url.searchParams.set("index", offset.toString());
   // sortField 6 = TotalDownloads,统一按下载量排序
