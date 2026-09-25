@@ -107,6 +107,15 @@
   border-color: var(--sl-primary) !important;
 }
 
+/* 复选框未选中态可见性:亮色下底色与描边同为 #e2e8f0(无轮廓),
+   材质下底色又只剩 0.48 白,落在浅底浮层上直接糊没。
+   用文字主色混出底与描边,随主题自动翻转 —— 亮底压深、暗底提亮。
+   特异性 (0,4,0) 压过库暗色规则,仍低于库 hover (0,5,0),hover 反馈保留 */
+.cmz-toggle:not(.cmz-toggle--checked):not(.cmz-toggle--indeterminate) .cmz-toggle__checkbox {
+  background: color-mix(in srgb, var(--sl-text-primary) 12%, transparent);
+  border-color: color-mix(in srgb, var(--sl-text-primary) 35%, transparent);
+}
+
 /* 输入框背景在毛玻璃下保持不透明 */
 [data-acrylic="on"] .cmz-input-container,
 [data-acrylic="on"] .cmz-textarea {
