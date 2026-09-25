@@ -11,6 +11,12 @@ const PAGE_SIZE = 24;
 
 const toast = useToast();
 const keyword = ref("");
+// 顶部筛选占位:真实筛选维度接入前先用占位标签撑起胶囊 tab,后续替换为 i18n 文案
+const activeFilter = ref("filter1");
+const filterTabs = [
+  { key: "filter1", label: "筛选一" },
+  { key: "filter2", label: "筛选二" },
+];
 const results = ref<ResourceSearchResult[]>([]);
 const activeResult = ref<ResourceSearchResult | null>(null);
 const loading = ref(false);
@@ -161,31 +167,30 @@ function selectResult(item: ResourceSearchResult) {
 
 <template>
   <div class="resource-market-view animate-stagger-in">
-    <section class="resource-market-header">
-      <div>
-        <h2>{{ i18n.t("common.resourceMarket.title") }}</h2>
-        <p class="resource-market-tip">{{ i18n.t("common.resourceMarket.tip") }}</p>
-      </div>
-      <div class="resource-market-search">
-        <cmz-input
-          v-model="keyword"
-          :placeholder="i18n.t('common.resourceMarket.search_placeholder')"
-          @keydown="handleKeydown"
-          clearable
-          class="resource-search-input"
-        >
-          <template #append>
-            <cmz-button
-              :loading="loading"
-              :disabled="keyword.trim() === ''"
-              variant="solid"
-              @click="handleSearch"
-            >
-              {{ i18n.t("common.resourceMarket.search") }}
-            </cmz-button>
-          </template>
-        </cmz-input>
-      </div>
+    <!-- 顶部工具条:横向胶囊 tab(筛选占位)+ 尾部搜索框,页面标题由顶栏统一承担 -->
+    <section class="resource-market-toolbar">
+      <cmz-tab-bar v-model="activeFilter" :tabs="filterTabs" :level="2">
+        <template #extra>
+          <cmz-input
+            v-model="keyword"
+            :placeholder="i18n.t('common.resourceMarket.search_placeholder')"
+            @keydown="handleKeydown"
+            clearable
+            class="resource-search-input"
+          >
+            <template #append>
+              <cmz-button
+                :loading="loading"
+                :disabled="keyword.trim() === ''"
+                variant="solid"
+                @click="handleSearch"
+              >
+                {{ i18n.t("common.resourceMarket.search") }}
+              </cmz-button>
+            </template>
+          </cmz-input>
+        </template>
+      </cmz-tab-bar>
     </section>
 
     <section class="resource-market-body">
@@ -282,22 +287,36 @@ function selectResult(item: ResourceSearchResult) {
   gap: var(--sl-space-lg);
 }
 
-.resource-market-header {
+/* 顶部工具条:筛选胶囊 tab 与尾部搜索框同行。
+   库对横向 tab 默认把 extra 槽压到下一行(flex-direction: column),
+   这里拉回同一行让搜索框贴在胶囊尾部;特异性拔到 (0,4,0)/(0,5,0) 压过库规则 */
+.resource-market-toolbar {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--sl-space-md);
 }
 
-.resource-market-tip {
-  margin-top: var(--sl-space-sm);
-  color: var(--sl-text-tertiary);
+.resource-market-toolbar :deep(.cmz-tab-bar.cmz-tab-bar--level-2) {
+  flex: 1;
+  min-width: 0;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 0;
 }
 
-.resource-market-search {
-  min-width: 320px;
+.resource-market-toolbar :deep(.cmz-tab-bar.cmz-tab-bar--level-2 .cmz-tab-bar__tabs) {
+  flex-shrink: 0;
+}
+
+.resource-market-toolbar :deep(.cmz-tab-bar.cmz-tab-bar--level-2 .cmz-tab-bar__extra) {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  justify-content: flex-end;
+}
+
+/* 胶囊 tab 的材质托底已提到 cmz-fallback.css 全局统一,此处不再重复声明 */
+
+.resource-search-input {
   width: 100%;
-  max-width: 640px;
 }
 
 .resource-search-input :deep(.cmz-input-container) {
@@ -516,9 +535,14 @@ function selectResult(item: ResourceSearchResult) {
 }
 
 @media (max-width: 900px) {
-  .resource-market-header {
+  /* 窄屏放不下就退回库的纵向堆叠:筛选一行,搜索框一行 */
+  .resource-market-toolbar :deep(.cmz-tab-bar.cmz-tab-bar--level-2) {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .resource-market-toolbar :deep(.cmz-tab-bar.cmz-tab-bar--level-2 .cmz-tab-bar__extra) {
+    margin: var(--sl-space-xs) 0 0;
   }
 
   .resource-market-list {

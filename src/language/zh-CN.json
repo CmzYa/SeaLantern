@@ -1369,7 +1369,13 @@
       "delete_failed": "备份删除失败",
       "load_failed": "加载备份列表失败",
       "settings_saved": "设置已保存",
-      "settings_save_failed": "设置保存失败"
+      "settings_save_failed": "设置保存失败",
+      "storage_path": "备份存储目录",
+      "copy_path": "复制路径",
+      "copied": "已复制到剪贴板",
+      "copy_failed": "复制失败",
+      "open_folder": "打开文件夹",
+      "open_folder_failed": "打开文件夹失败"
     },
     "dev_test": {
       "title": "开发者测试工具",

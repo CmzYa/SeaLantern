@@ -139,6 +139,24 @@
   opacity: 1;
 }
 
+/* === Tab 栏胶囊(level-2)材质统一 === */
+/* 库的 level-2 胶囊底取自 --cmz-bg-tertiary,材质下即 --sl-bg-tertiary(0.48 白),
+   与主容器 --sl-surface(0.45 白)几乎同色 → 胶囊整片糊掉、跨页观感不一致。
+   注意:在材质卡面上"压深"会把胶囊做成一块脏灰(低透明黑叠半透明白 = 灰),
+   所以这里反向走"提亮"——用近实底托成一块干净的凹槽,靠明度差与卡面分层;
+   描边换材质专用描边,不再用主色混色(混出来在灰底上同样发脏)。
+   :root 前缀把特异性提到 (0,4,0),压过库 scoped 规则的 (0,2,0) */
+:root[data-acrylic="on"] .cmz-tab-bar.cmz-tab-bar--level-2 {
+  background: var(--sl-acrylic-bg);
+  border-color: var(--sl-acrylic-border);
+}
+
+/* 选中胶囊:库默认 opacity:.9 会让主色描边与文字叠在浅底上一起变灰,
+   材质下提到不透明,选中项才立得住 */
+:root[data-acrylic="on"] .cmz-tab-bar.cmz-tab-bar--level-2 .cmz-tab-bar__indicator {
+  opacity: 1;
+}
+
 /* === 设置页面行布局 — 项目自有类,与配置项风格一致 === */
 .settings-entry {
   display: flex;

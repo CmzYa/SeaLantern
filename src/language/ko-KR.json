@@ -1370,7 +1370,13 @@
     "delete_failed": "Failed to delete backup",
     "load_failed": "Failed to load backup list",
     "settings_saved": "Settings saved",
-    "settings_save_failed": "Failed to save settings"
+    "settings_save_failed": "Failed to save settings",
+    "storage_path": "백업 저장 경로",
+    "copy_path": "경로 복사",
+    "copied": "클립보드에 복사되었습니다",
+    "copy_failed": "복사 실패",
+    "open_folder": "폴더 열기",
+    "open_folder_failed": "폴더를 열 수 없습니다"
   },
   "dev_test": {
     "title": "Developer Test Tools",
