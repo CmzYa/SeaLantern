@@ -22,19 +22,31 @@
   -webkit-backdrop-filter: none;
 }
 
-/* 模态框外壳用卡片同款 surface 实底,透明窗口下保证玻璃质感不露黑 */
+/* 模态框外壳：默认实底；高级材质下换浮层近实底 + 磨砂，与下拉浮层保持统一。
+   磨砂强度取自 --cmz-acrylic-blur (<- acrylic.ts 下发的 --sl-acrylic-blur)，
+   与窗口级原生材质(Windows acrylic / macOS vibrancy)同源，强度保持一致 */
 :root .cmz-modal.cmz-modal {
   position: relative;
   z-index: 900;
   background: var(--sl-surface, #fff);
-  backdrop-filter: blur(24px) saturate(var(--cmz-saturate-normal, 180%));
-  -webkit-backdrop-filter: blur(24px) saturate(var(--cmz-saturate-normal, 180%));
+  border: 1px solid var(--sl-border);
+  backdrop-filter: blur(var(--cmz-acrylic-blur, 16px)) saturate(var(--cmz-saturate-normal, 180%));
+  -webkit-backdrop-filter: blur(var(--cmz-acrylic-blur, 16px))
+    saturate(var(--cmz-saturate-normal, 180%));
   border-radius: var(--sl-radius-xl, 24px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--sl-shadow-elevated);
   max-height: 90vh;
   display: flex;
   flex-direction: column;
   min-width: 360px;
+}
+
+/* 高级材质下浮层换近实底,保证正文可读性。
+   必须带 :root + 双 .cmz-modal 把特异性提到 (0,4,0) 压过上面的实底规则,
+   否则会用到 --sl-surface(材质下仅 0.45 不透明),内容透底、字发灰 */
+:root[data-acrylic="on"] .cmz-modal.cmz-modal {
+  background: var(--sl-acrylic-bg-strong);
+  border-color: var(--sl-acrylic-border);
 }
 
 /* 正文统一行高与字色，提升可读性；宽度交给各组件的 width/max-width 控制 */
