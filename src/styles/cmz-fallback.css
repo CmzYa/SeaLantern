@@ -29,12 +29,18 @@
   background: var(--sl-surface, #fff);
   backdrop-filter: blur(24px) saturate(var(--cmz-saturate-normal, 180%));
   -webkit-backdrop-filter: blur(24px) saturate(var(--cmz-saturate-normal, 180%));
-  border-radius: var(--sl-radius-lg, 12px);
+  border-radius: var(--sl-radius-xl, 24px);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
   max-height: 90vh;
   display: flex;
   flex-direction: column;
-  min-width: 320px;
+  min-width: 360px;
+}
+
+/* 正文统一行高与字色，提升可读性；宽度交给各组件的 width/max-width 控制 */
+:root .cmz-modal .cmz-modal-body {
+  line-height: 1.6;
+  color: var(--sl-text-secondary);
 }
 
 /* === Select 下拉浮层材质 === */
